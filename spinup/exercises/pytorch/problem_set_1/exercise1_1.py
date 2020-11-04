@@ -23,8 +23,9 @@ def gaussian_likelihood(x, mu, log_std):
     Returns:
         Tensor with shape [batch]
     """
+    # import pdb; pdb.set_trace()
     return -1.0/2 * torch.sum((x-mu)**2 / torch.exp(log_std)**2 + 2 * log_std + np.log(2*np.pi),
-                              dim=1)
+                              dim=-1)
 
 
 if __name__ == '__main__':
