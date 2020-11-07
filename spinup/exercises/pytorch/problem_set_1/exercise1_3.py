@@ -4,11 +4,11 @@ import numpy as np
 import torch
 from torch.optim import Adam
 import gym
-import time
 import spinup.algos.pytorch.td3.core as core
 from spinup.algos.pytorch.td3.td3 import td3 as true_td3
 from spinup.utils.logx import EpochLogger
-
+from torch.utils.tensorboard import SummaryWriter
+import time
 """
 
 Exercise 1.3: TD3 Computation Graph
@@ -23,6 +23,8 @@ exercise. But you will use one to build the graph for computing the
 TD3 updates.
 
 """
+
+writer = SummaryWriter()
 
 class ReplayBuffer:
     """
@@ -204,37 +206,26 @@ def td3(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
         o, a, r, o2, d = data['obs'], data['act'], data['rew'], data['obs2'], data['done']
 
         # Q-values
-        #######################
-        #                     #
-        #   YOUR CODE HERE    #
-        #                     #
-        #######################
-        # q1 = 
-        # q2 = 
+        q1 = ac.q1(o, a)
+        q2 = ac.q2(o, a)
 
-        # Target policy smoothing
-        #######################
-        #                     #
-        #   YOUR CODE HERE    #
-        #                     #
-        #######################
+        # no gradients needed through these variables because it's only needed for the variables that need
+        # gradient descent through an optimization. So only q1 and q2 need the .requires_grad feature
+        with torch.no_grad():
+            # Target policy smoothing
+            eps = torch.randn_like(a) * target_noise
+            a_targ = torch.clamp(ac_targ.pi(o2) + torch.clamp(eps, -noise_clip, noise_clip), min=-act_limit,
+                                 max=act_limit)
 
-        # Target Q-values
-        #######################
-        #                     #
-        #   YOUR CODE HERE    #
-        #                     #
-        #######################
+            # Target Q-values
+            assert d.dtype == torch.float32  # ensure d is not a bool
+            y = r + gamma * (1 - d) * torch.min(ac_targ.q1(o2, a_targ),
+                                                ac_targ.q2(o2, a_targ))
 
         # MSE loss against Bellman backup
-        #######################
-        #                     #
-        #   YOUR CODE HERE    #
-        #                     #
-        #######################
-        # loss_q1 = 
-        # loss_q2 = 
-        # loss_q = 
+        loss_q1 = torch.mean((q1 - y)**2)
+        loss_q2 = torch.mean((q2 - y)**2)
+        loss_q = (loss_q1 + loss_q2)/2  # average of the Q's is fine (sum is also fine)
 
         # Useful info for logging
         loss_info = dict(Q1Vals=q1.detach().numpy(),
@@ -244,12 +235,9 @@ def td3(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
 
     # Set up function for computing TD3 pi loss
     def compute_loss_pi(data):
-        #######################
-        #                     #
-        #   YOUR CODE HERE    #
-        #                     #
-        #######################
-        # loss_pi = 
+        o = data['obs']
+        q1 = ac.q1(o, ac.pi(o))
+        loss_pi = (-1 * q1).mean()
         return loss_pi
 
     #=========================================================================#
@@ -374,6 +362,11 @@ def td3(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
             # Test the performance of the deterministic version of the agent.
             test_agent()
 
+            writer.add_scalar('ep return', np.mean(logger.epoch_dict['EpRet']), epoch)
+            writer.add_scalar('loss pi', np.mean(logger.epoch_dict['LossPi']), epoch)
+            writer.add_scalar('loss q', np.mean(logger.epoch_dict['LossQ']), epoch)
+            writer.flush()
+
             # Log info about epoch
             logger.log_tabular('Epoch', epoch)
             logger.log_tabular('EpRet', with_min_and_max=True)
@@ -407,10 +400,12 @@ if __name__ == '__main__':
         max_ep_len=150,
         seed=args.seed, 
         logger_kwargs=logger_kwargs,
-        epochs=10
+        epochs=50
         )
     
     if args.use_soln:
         true_td3(**all_kwargs)
     else:
         td3(**all_kwargs)
+
+    writer.close()
