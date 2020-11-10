@@ -7,13 +7,13 @@ discussed in UC Berkeley's CS 285 (Deep RL) course.
 
 import torch
 import torch.nn as nn
+import numpy as np
 from torch.optim import Adam
 import gym
+from torch.utils.tensorboard import SummaryWriter
 
 # MLP code is taken from SU
 from spinup.algos.pytorch.vpg.core import MLPCategoricalActor
-
-
 
 def rpg(env_fn=(lambda: gym.make("CartPole-v1"))):
     """
@@ -33,9 +33,12 @@ def rpg(env_fn=(lambda: gym.make("CartPole-v1"))):
     pi = MLPCategoricalActor(obs_dim, act_dim, hidden_sizes, activation)
     pi_optimizer = Adam(pi.parameters(), lr=pi_lr)
 
+
     for ep in range(num_epochs):
         print(f"Epoch num: {ep}")
-        loss = 0
+
+        batch_rewards = torch.zeros(batch_size)
+        batch_log_prob = torch.zeros(batch_size)
         for i in range(batch_size):
             # for each trajectory
             o = env.reset()
@@ -56,17 +59,24 @@ def rpg(env_fn=(lambda: gym.make("CartPole-v1"))):
                 sum_rewards += r
 
                 o = o2
-            loss_term = -1 * sum_log_prob * sum_rewards
-            loss += loss_term / batch_size
+            batch_rewards[i] = sum_rewards
+            batch_log_prob[i] = sum_log_prob
+
+        loss = -1 * (batch_log_prob * batch_rewards).mean()
 
         pi_optimizer.zero_grad()
         loss.backward()
         pi_optimizer.step()
+
         print(f"pi loss is: {loss}")
+        writer.add_scalar("pi loss", float(loss), ep)
+        writer.add_scalar("avg return", float(batch_rewards.mean()), ep)
 
     print("Done training the agent.")
 
 
 
 if __name__ == '__main__':
+    global writer
+    writer = SummaryWriter(flush_secs=30)
     rpg()
