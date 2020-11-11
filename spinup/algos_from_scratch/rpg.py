@@ -14,14 +14,15 @@ from torch.utils.tensorboard import SummaryWriter
 
 # MLP code is taken from SU
 from spinup.algos.pytorch.vpg.core import MLPCategoricalActor
+from spinup.utils.logx import EpochLogger
 
-def rpg(env_fn=(lambda: gym.make("CartPole-v1"))):
+
+def rpg(env_fn=(lambda: gym.make("CartPole-v1")), batch_size=100, hidden_sizes = (32, 32),
+        pi_lr=0.0003, logger_kwargs=dict()):
     """
 
     """
-    batch_size = 1000
-    pi_lr = 0.00003
-    hidden_sizes = (32, 32)
+    max_traj_length = 500
     activation = nn.Tanh
     num_epochs = 100
 
@@ -33,6 +34,8 @@ def rpg(env_fn=(lambda: gym.make("CartPole-v1"))):
     pi = MLPCategoricalActor(obs_dim, act_dim, hidden_sizes, activation)
     pi_optimizer = Adam(pi.parameters(), lr=pi_lr)
 
+    logger = EpochLogger(**logger_kwargs)
+    logger.setup_pytorch_saver(pi)
 
     for ep in range(num_epochs):
         print(f"Epoch num: {ep}")
@@ -42,41 +45,58 @@ def rpg(env_fn=(lambda: gym.make("CartPole-v1"))):
         for i in range(batch_size):
             # for each trajectory
             o = env.reset()
-            sum_log_prob = 0
-            sum_rewards = 0
             d = False  # bool for "done"
 
-            # get sum_log_prob and sum_rewards
+            # buffers for o, a, r; contains all values for one trajectory
+            # assumes cartpole dimensions
+            buffer_o = np.zeros((max_traj_length, obs_dim))
+            buffer_a = np.zeros(max_traj_length)
+            buffer_r = np.zeros(max_traj_length)
+            ptr = 0  # pointer to the position in the buffer
+
             while not d:
                 o = torch.as_tensor(o, dtype=torch.float32)
                 a = pi._distribution(o).sample()  # sample Categorical policy to get an action
                 o2, r, d, _ = env.step(a.numpy())
                 o2 = torch.as_tensor(o2, dtype=torch.float32)
 
-                log_prob = pi._log_prob_from_distribution(pi._distribution(o), a)
-                sum_log_prob += log_prob
-
-                sum_rewards += r
+                buffer_o[ptr] = o.numpy()
+                buffer_a[ptr] = a
+                buffer_r[ptr] = r
 
                 o = o2
-            batch_rewards[i] = sum_rewards
-            batch_log_prob[i] = sum_log_prob
+                ptr += 1
+                if ptr >= max_traj_length:
+                    break
 
-        loss = -1 * (batch_log_prob * batch_rewards).mean()
+            batch_rewards[i] = buffer_r[:ptr].sum()
+            log_probs = pi._log_prob_from_distribution(pi._distribution(torch.as_tensor(buffer_o[:ptr], dtype=torch.float32)),
+                                                       torch.as_tensor(buffer_a[:ptr], dtype=torch.float32))
+            batch_log_prob[i] = log_probs.sum()
 
         pi_optimizer.zero_grad()
+        loss = -1 * (batch_log_prob * batch_rewards).mean()
         loss.backward()
         pi_optimizer.step()
 
-        print(f"pi loss is: {loss}")
         writer.add_scalar("pi loss", float(loss), ep)
         writer.add_scalar("avg return", float(batch_rewards.mean()), ep)
+        if ep % 10 == 0:
+            logger.save_state({'env': env}, None)  # also saves pi
+
 
     print("Done training the agent.")
-
+    logger.save_state({'env': env}, None)  # also saves pi
 
 
 if __name__ == '__main__':
     global writer
-    writer = SummaryWriter(flush_secs=30)
-    rpg()
+
+    lr_list = [0.0003, 0.001, 0.003, 0.01, 0.03]
+    for lr in lr_list:
+        logger_kwargs = {"output_dir": f"logged_data/logged_data_pi_lr_{lr}",
+                         "exp_name": f"pi_lr_{lr}"}
+
+        writer = SummaryWriter(log_dir=f"runs/sweep_pi_lr_{lr}", flush_secs=30)
+        rpg(batch_size=100, pi_lr=lr, logger_kwargs=logger_kwargs)
+        writer.close()
