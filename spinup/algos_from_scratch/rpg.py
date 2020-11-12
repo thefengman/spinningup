@@ -12,38 +12,35 @@ from torch.optim import Adam
 import gym
 from torch.utils.tensorboard import SummaryWriter
 
-# MLP code is taken from SU
+# some code taken from SU for convenience
 from spinup.algos.pytorch.vpg.core import MLPCategoricalActor
 from spinup.utils.logx import EpochLogger
 
 
-def rpg(env_fn=(lambda: gym.make("CartPole-v1")), batch_size=100, hidden_sizes = (32, 32),
-        pi_lr=0.0003, logger_kwargs=dict()):
+def rpg(env_fn=(lambda: gym.make("CartPole-v1")), max_traj_length=500, batch_size=100, num_epochs=100,
+        hidden_sizes=(32, 32), activation=nn.Tanh, pi_lr=0.0003, logger_kwargs=dict(), writer_kwargs=dict()):
     """
-
+    Assumes env is CartPole-v1; if want to cleanup later, just make the dimensions general to any env
     """
-    max_traj_length = 500
-    activation = nn.Tanh
-    num_epochs = 100
-
     env = env_fn()
     # Assume obs space is a Box
     obs_dim = env.observation_space.shape[0]
-    # Assume action space is Discrete (categorical), which is why we evaulate .n (rather than .shape[0])
+    # Assume action space is Discrete (categorical), which is why we evaluate .n (rather than .shape[0])
     act_dim = env.action_space.n
     pi = MLPCategoricalActor(obs_dim, act_dim, hidden_sizes, activation)
     pi_optimizer = Adam(pi.parameters(), lr=pi_lr)
 
     logger = EpochLogger(**logger_kwargs)
     logger.setup_pytorch_saver(pi)
+    writer = SummaryWriter(**writer_kwargs)
 
     for ep in range(num_epochs):
         print(f"Epoch num: {ep}")
 
+        # batch arrays; contains relevant data for batch of trajectories
         batch_rewards = torch.zeros(batch_size)
         batch_log_prob = torch.zeros(batch_size)
         for i in range(batch_size):
-            # for each trajectory
             o = env.reset()
             d = False  # bool for "done"
 
@@ -54,6 +51,7 @@ def rpg(env_fn=(lambda: gym.make("CartPole-v1")), batch_size=100, hidden_sizes =
             buffer_r = np.zeros(max_traj_length)
             ptr = 0  # pointer to the position in the buffer
 
+            # take data for one entire trajectory
             while not d:
                 o = torch.as_tensor(o, dtype=torch.float32)
                 a = pi._distribution(o).sample()  # sample Categorical policy to get an action
@@ -69,34 +67,36 @@ def rpg(env_fn=(lambda: gym.make("CartPole-v1")), batch_size=100, hidden_sizes =
                 if ptr >= max_traj_length:
                     break
 
+            # save traj data into batch arrays
             batch_rewards[i] = buffer_r[:ptr].sum()
-            log_probs = pi._log_prob_from_distribution(pi._distribution(torch.as_tensor(buffer_o[:ptr], dtype=torch.float32)),
+            log_probs = pi._log_prob_from_distribution(pi._distribution(torch.as_tensor(buffer_o[:ptr],
+                                                                                        dtype=torch.float32)),
                                                        torch.as_tensor(buffer_a[:ptr], dtype=torch.float32))
             batch_log_prob[i] = log_probs.sum()
 
+        # run one step of gradient descent optimizer
         pi_optimizer.zero_grad()
         loss = -1 * (batch_log_prob * batch_rewards).mean()
         loss.backward()
         pi_optimizer.step()
 
+        # logging
         writer.add_scalar("pi loss", float(loss), ep)
         writer.add_scalar("avg return", float(batch_rewards.mean()), ep)
         if ep % 10 == 0:
             logger.save_state({'env': env}, None)  # also saves pi
 
-
     print("Done training the agent.")
     logger.save_state({'env': env}, None)  # also saves pi
+    writer.close()
 
 
 if __name__ == '__main__':
-    global writer
+    lr = 0.003
+    logger_kwargs = {"output_dir": f"logged_data/investigate_loss_pi_{lr}",
+                     "exp_name": f"investigate_loss_pi_{lr}"}
+    writer_kwargs = {"log_dir": f"runs/investigate_loss_pi_{lr}",
+                     "flush_secs": 30}
 
-    lr_list = [0.0003, 0.001, 0.003, 0.01, 0.03]
-    for lr in lr_list:
-        logger_kwargs = {"output_dir": f"logged_data/logged_data_pi_lr_{lr}",
-                         "exp_name": f"pi_lr_{lr}"}
+    rpg(batch_size=100, pi_lr=lr, logger_kwargs=logger_kwargs, writer_kwargs=writer_kwargs)
 
-        writer = SummaryWriter(log_dir=f"runs/sweep_pi_lr_{lr}", flush_secs=30)
-        rpg(batch_size=100, pi_lr=lr, logger_kwargs=logger_kwargs)
-        writer.close()
