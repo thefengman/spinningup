@@ -27,57 +27,64 @@ def epsilon_greedy_policy_fn(q, obs, action_space, epsilon):
     """
     Call this to create the policy function.
     """
-    # Assume obs shape is either (batch_size, obs_dim) or (obs_dim), to extract batch size
-    assert obs.dim() in [1, 2]
-    batch_size = obs.shape[0] if obs.dim() == 2 else batch_size = 1
+    # Vectorize (obs,act) to input into Q with all possible actions
+    # TODO: generalize to other spaces; consider converting to numpy, e.g. to use np.repeat / np.tile
+    assert type(action_space) is gym.spaces.discrete.Discrete
+    assert type(action_space.sample()) is int  # 1 number, not an array of numbers
+    num_actions = action_space.n
+    possible_actions = torch.arange(num_actions)
 
-    if float(torch.rand(1)) > epsilon:
-        # Vectorize (obs,act) to input into Q with all possible actions
-        # TODO: generalize to other spaces; consider converting to numpy, e.g. to use np.repeat / np.tile
-        assert type(action_space) is gym.spaces.discrete.Discrete
-        assert type(action_space.sample()) is int  # 1 number, not an array of numbers
-        num_actions = action_space.n
-        possible_actions = torch.arange(num_actions)
-        act_input = possible_actions.repeat_interleave(batch_size).reshape((batch_size * num_actions, 1))
+    def epsilon_greedy_policy(obs):
+        # Assume obs shape is either (batch_size, obs_dim) or (obs_dim), to extract batch size
+        assert obs.dim() in [1, 2]
+        if obs.dim() == 2:
+            batch_size = obs.shape[0]
+        else:
+            batch_size = 1
 
-        if batch_size == 1:
-            obs = obs.reshape((1, -1))  # makes it a row vector
-        obs_input = obs.repeat((num_actions, 1))
+        if float(torch.rand(1)) > epsilon:
+            act_input = possible_actions.repeat_interleave(batch_size).reshape((batch_size * num_actions, 1))
 
-        # act_input and obs_input are wrangled to a shape s.t. they will concatenate properly when fed to Q-function
-        # example, if batch size is 2, possible actions are [0,1,2], and obs is [[10, 20, 30],
-        #                                                                        [40, 50, 60]]
-        # then:
-        # act_input is: [[0],
-        #                [0],
-        #                [1],
-        #                [1],
-        #                [2],
-        #                [2]]
-        # obs_input is: [[10, 20, 30],
-        #                [40, 50, 60],
-        #                [10, 20, 30],
-        #                [40, 50, 60],
-        #                [10, 20, 30],
-        #                [40, 50, 60]]
+            if batch_size == 1:
+                obs = obs.reshape((1, -1))  # makes it a row vector
+            obs_input = obs.repeat((num_actions, 1))
 
-        q_vals = q(obs_input, act_input)
-        q_vals = q_vals.reshape((batch_size, -1))
+            # act_input and obs_input are wrangled to a shape s.t. they will concatenate properly when fed to Q-function
+            # example, if batch size is 2, possible actions are [0,1,2], and obs is [[10, 20, 30],
+            #                                                                        [40, 50, 60]]
+            # then:
+            # act_input is: [[0],
+            #                [0],
+            #                [1],
+            #                [1],
+            #                [2],
+            #                [2]]
+            # obs_input is: [[10, 20, 30],
+            #                [40, 50, 60],
+            #                [10, 20, 30],
+            #                [40, 50, 60],
+            #                [10, 20, 30],
+            #                [40, 50, 60]]
 
-        # # q_vals should now be like:
-        # #                action 0      action 1      action 2
-        # # batch 0      [[10,           20,           30,
-        # # batch 1        11,           21,           31]]
+            q_vals = q(obs_input, act_input)
+            q_vals = q_vals.reshape((batch_size, -1))
 
-        # TODO: will need to generalize this code if need for batch_size > 1
-        assert batch_size == 1
-        arg = q_vals.flatten().argmax()
-        return int(possible_actions[arg])
+            # # q_vals should now be like:
+            # #                action 0      action 1      action 2
+            # # batch 0      [[10,           20,           30,
+            # # batch 1        11,           21,           31]]
 
-    else:
-        # TODO: will need to generalize this code if need for batch_size > 1
-        assert batch_size == 1
-        return action_space.sample()
+            # TODO: will need to generalize this code if need for batch_size > 1
+            assert batch_size == 1
+            arg = q_vals.flatten().argmax()
+            return int(possible_actions[arg])
+
+        else:
+            # TODO: will need to generalize this code if need for batch_size > 1
+            assert batch_size == 1
+            return action_space.sample()
+
+    return epsilon_greedy_policy
 
 
 class MLPQFunction(nn.Module):
@@ -113,7 +120,7 @@ class MLPActorCritic(nn.Module):
 
 
 
-def dqn(env_fn, actor_critic=core.MLPActorCritic, ac_kwargs=dict(), seed=0,
+def dqn(env_fn, actor_critic=MLPActorCritic, ac_kwargs=dict(), seed=0,
         steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99,
         polyak=0.995, pi_lr=1e-3, q_lr=1e-3, batch_size=100, start_steps=10000,
         update_after=1000, update_every=50, act_noise=0.1, num_test_episodes=10,
@@ -139,7 +146,7 @@ if __name__ == '__main__':
     from spinup.utils.run_utils import setup_logger_kwargs
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
 
-    dqn(lambda : gym.make(args.env), actor_critic=core.MLPActorCritic,
+    dqn(lambda : gym.make(args.env), actor_critic=MLPActorCritic,
         ac_kwargs=dict(hidden_sizes=[args.hid]*args.l),
         gamma=args.gamma, seed=args.seed, epochs=args.epochs,
         logger_kwargs=logger_kwargs)
