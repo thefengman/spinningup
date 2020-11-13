@@ -15,79 +15,78 @@ from spinup.algos.pytorch.ddpg.core import mlp
 from spinup.algos.pytorch.ddpg.ddpg import ReplayBuffer
 
 
-# class MLPActor(nn.Module):
-#     """
-#     epsilon-greedy
-#     """
-#     def __init__(self, obs_dim, act_dim, , activation, epsilon):
-#         super().__init__()
-#         self.pi = mlp(pi_sizes, activation, nn.Tanh)
-
-def epsilon_greedy_policy_fn(q, obs, action_space, epsilon):
+def epsilon_greedy_policy_fn(q, action_space, epsilon):
     """
     Call this to create the policy function.
+    assumes type(action_space) is gym.spaces.discrete.Discrete
+    assumes type(action_space.sample()) is int  # 1 number, not an array of numbers
     """
-    # Vectorize (obs,act) to input into Q with all possible actions
-    # TODO: generalize to other spaces; consider converting to numpy, e.g. to use np.repeat / np.tile
-    assert type(action_space) is gym.spaces.discrete.Discrete
-    assert type(action_space.sample()) is int  # 1 number, not an array of numbers
-    num_actions = action_space.n
-    possible_actions = torch.arange(num_actions)
-
     def epsilon_greedy_policy(obs):
-        # Assume obs shape is either (batch_size, obs_dim) or (obs_dim), to extract batch size
-        assert obs.dim() in [1, 2]
-        if obs.dim() == 2:
-            batch_size = obs.shape[0]
-        else:
-            batch_size = 1
+        # Assume batch_size == 1. Need to generalize to allow batch_size > 1
+        assert obs.dim() == 1
 
         if float(torch.rand(1)) > epsilon:
-            act_input = possible_actions.repeat_interleave(batch_size).reshape((batch_size * num_actions, 1))
-
-            if batch_size == 1:
-                obs = obs.reshape((1, -1))  # makes it a row vector
-            obs_input = obs.repeat((num_actions, 1))
-
-            # act_input and obs_input are wrangled to a shape s.t. they will concatenate properly when fed to Q-function
-            # example, if batch size is 2, possible actions are [0,1,2], and obs is [[10, 20, 30],
-            #                                                                        [40, 50, 60]]
-            # then:
-            # act_input is: [[0],
-            #                [0],
-            #                [1],
-            #                [1],
-            #                [2],
-            #                [2]]
-            # obs_input is: [[10, 20, 30],
-            #                [40, 50, 60],
-            #                [10, 20, 30],
-            #                [40, 50, 60],
-            #                [10, 20, 30],
-            #                [40, 50, 60]]
-
-            q_vals = q(obs_input, act_input)
-            q_vals = q_vals.reshape((batch_size, -1))
-
-            # # q_vals should now be like:
-            # #                action 0      action 1      action 2
-            # # batch 0      [[10,           20,           30,
-            # # batch 1        11,           21,           31]]
-
-            # TODO: will need to generalize this code if need for batch_size > 1
-            assert batch_size == 1
-            arg = q_vals.flatten().argmax()
-            return int(possible_actions[arg])
-
+            return q(obs).argmax()
         else:
-            # TODO: will need to generalize this code if need for batch_size > 1
-            assert batch_size == 1
-            return action_space.sample()
+            return torch.tensor(action_space.sample())
 
     return epsilon_greedy_policy
 
 
 class MLPQFunction(nn.Module):
+    # some code that may or may not be helpful when I get around to coding Q
+    # # TODO: generalize to other spaces; consider converting to numpy, e.g. to use np.repeat / np.tile
+    # assert type(action_space) is gym.spaces.discrete.Discrete
+    # assert type(action_space.sample()) is int  # 1 number, not an array of numbers
+    # num_actions = action_space.n
+    # possible_actions = torch.arange(num_actions)
+    # Assume obs shape is either (batch_size, obs_dim) or (obs_dim), to extract batch size
+    # assert obs.dim() in [1, 2]
+    # if obs.dim() == 2:
+    #     batch_size = obs.shape[0]
+    # else:
+    #     batch_size = 1
+    #
+    # if float(torch.rand(1)) > epsilon:
+    #     act_input = possible_actions.repeat_interleave(batch_size).reshape((batch_size * num_actions, 1))
+    #
+    #     if batch_size == 1:
+    #         obs = obs.reshape((1, -1))  # makes it a row vector
+    #     obs_input = obs.repeat((num_actions, 1))
+    #
+    #     # act_input and obs_input are wrangled to a shape s.t. they will concatenate properly when fed to Q-function
+    #     # example, if batch size is 2, possible actions are [0,1,2], and obs is [[10, 20, 30],
+    #     #                                                                        [40, 50, 60]]
+    #     # then:
+    #     # act_input is: [[0],
+    #     #                [0],
+    #     #                [1],
+    #     #                [1],
+    #     #                [2],
+    #     #                [2]]
+    #     # obs_input is: [[10, 20, 30],
+    #     #                [40, 50, 60],
+    #     #                [10, 20, 30],
+    #     #                [40, 50, 60],
+    #     #                [10, 20, 30],
+    #     #                [40, 50, 60]]
+    #
+    #     q_vals = q(obs_input)
+    #     q_vals = q_vals.reshape((batch_size, -1))
+    #
+    #     # # q_vals should now be like:
+    #     # #                action 0      action 1      action 2
+    #     # # batch 0      [[10,           20,           30,
+    #     # # batch 1        11,           21,           31]]
+    #
+    #     assert batch_size == 1
+    #     arg = q_vals.flatten().argmax()
+    #     return int(possible_actions[arg])
+    #
+    # else:
+    #     assert batch_size == 1
+    #     return action_space.sample()
+
     def __init__(self, obs_dim, act_dim, hidden_sizes, activation):
         super().__init__()
         self.q = mlp([obs_dim + act_dim] + list(hidden_sizes) + [1], activation)
