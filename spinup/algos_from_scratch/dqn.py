@@ -27,44 +27,57 @@ def epsilon_greedy_policy_fn(q, obs, action_space, epsilon):
     """
     Call this to create the policy function.
     """
-    # assume obs shape is either (batch_size, obs_dim) or (obs_dim), to extract batch size
+    # Assume obs shape is either (batch_size, obs_dim) or (obs_dim), to extract batch size
     assert obs.dim() in [1, 2]
     batch_size = obs.shape[0] if obs.dim() == 2 else batch_size = 1
 
-    # TODO: make this more general to other spaces, if needed; might want to consider converting to numpy,
-    # e.g. to use np.repeat / np.tile
-    assert type(action_space) is gym.spaces.discrete.Discrete
-    assert type(action_space.sample()) is int  # 1 number, not an array of numbers
-    num_actions = action_space.n
-    possible_actions = torch.arange(num_actions)
-    act_input = possible_actions.repeat_interleave(batch_size).reshape((batch_size * num_actions, 1))
+    if float(torch.rand(1)) > epsilon:
+        # Vectorize (obs,act) to input into Q with all possible actions
+        # TODO: generalize to other spaces; consider converting to numpy, e.g. to use np.repeat / np.tile
+        assert type(action_space) is gym.spaces.discrete.Discrete
+        assert type(action_space.sample()) is int  # 1 number, not an array of numbers
+        num_actions = action_space.n
+        possible_actions = torch.arange(num_actions)
+        act_input = possible_actions.repeat_interleave(batch_size).reshape((batch_size * num_actions, 1))
 
-    if batch_size == 1:
-        obs = obs.reshape((batch_size, obs.shape[0]))
-    obs_input = obs.repeat((num_actions, 1))
+        if batch_size == 1:
+            obs = obs.reshape((1, -1))  # makes it a row vector
+        obs_input = obs.repeat((num_actions, 1))
 
-    # act_input and obs_input are wrangled to a shape s.t. they will concatenate properly when fed to Q-function
-    # example, if batch size is 2, possible actions are [0,1,2], and obs is [[10, 20, 30],
-    #                                                                        [40, 50, 60]]
-    # then:
-    # act_input is: [[0],
-    #                [0],
-    #                [1],
-    #                [1],
-    #                [2],
-    #                [2]]
-    # obs_input is: [[10, 20, 30],
-    #                [40, 50, 60],
-    #                [10, 20, 30],
-    #                [40, 50, 60],
-    #                [10, 20, 30],
-    #                [40, 50, 60]]
+        # act_input and obs_input are wrangled to a shape s.t. they will concatenate properly when fed to Q-function
+        # example, if batch size is 2, possible actions are [0,1,2], and obs is [[10, 20, 30],
+        #                                                                        [40, 50, 60]]
+        # then:
+        # act_input is: [[0],
+        #                [0],
+        #                [1],
+        #                [1],
+        #                [2],
+        #                [2]]
+        # obs_input is: [[10, 20, 30],
+        #                [40, 50, 60],
+        #                [10, 20, 30],
+        #                [40, 50, 60],
+        #                [10, 20, 30],
+        #                [40, 50, 60]]
 
-    q_vals = q(obs_input, act_input)
+        q_vals = q(obs_input, act_input)
+        q_vals = q_vals.reshape((batch_size, -1))
 
-    # TODO: continue here
-    # next, wrangle the q_vals (should have shape (num_actions * batch_size,), i.e. 1-dim) s.t. you can do argmax()
-    # Then return the action that had the argmax, unless epsilon
+        # # q_vals should now be like:
+        # #                action 0      action 1      action 2
+        # # batch 0      [[10,           20,           30,
+        # # batch 1        11,           21,           31]]
+
+        # TODO: will need to generalize this code if need for batch_size > 1
+        assert batch_size == 1
+        arg = q_vals.flatten().argmax()
+        return int(possible_actions[arg])
+
+    else:
+        # TODO: will need to generalize this code if need for batch_size > 1
+        assert batch_size == 1
+        return action_space.sample()
 
 
 class MLPQFunction(nn.Module):
