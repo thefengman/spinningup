@@ -9,6 +9,7 @@ from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import gym
 import argparse
+import copy
 
 from spinup.utils.logx import EpochLogger
 from spinup.algos.pytorch.ddpg.core import mlp
@@ -20,22 +21,24 @@ def epsilon_greedy_policy_fn(q, action_space, epsilon):
     Call this to create the policy function.
     assumes type(action_space) is gym.spaces.discrete.Discrete
     assumes type(action_space.sample()) is int  # 1 number, not an array of numbers
+    Returns a numpy array (usually of one element)
     """
     def epsilon_greedy_policy(obs):
         # Assume batch_size == 1. Need to generalize to allow batch_size > 1
         assert obs.dim() == 1
 
         if float(torch.rand(1)) > epsilon:
-            return q(obs).argmax()
+            return q(obs).argmax().numpy()
         else:
-            return torch.tensor(action_space.sample())
+            return np.array(action_space.sample())
 
     return epsilon_greedy_policy
 
 
 class MLPQFunction(nn.Module):
+    # TODO: need to fill in this Q function
+
     # some code that may or may not be helpful when I get around to coding Q
-    # # TODO: generalize to other spaces; consider converting to numpy, e.g. to use np.repeat / np.tile
     # assert type(action_space) is gym.spaces.discrete.Discrete
     # assert type(action_space.sample()) is int  # 1 number, not an array of numbers
     # num_actions = action_space.n
@@ -93,42 +96,101 @@ class MLPQFunction(nn.Module):
 
     def forward(self, obs, act):
         q = self.q(torch.cat([obs, act], dim=-1))
-        return torch.squeeze(q, -1) # Critical to ensure q has right shape.
+        return torch.squeeze(q, -1)  # Critical to ensure q has right shape.
+
 
 class MLPActorCritic(nn.Module):
     def __init__(self, observation_space, action_space, hidden_sizes=(256, 256),
-                 activation=nn.ReLU):
+                 activation=nn.ReLU, epsilon=0.0):
         super().__init__()
         obs_dim = observation_space.shape[0]
         act_dim = action_space.shape[0]
         # TODO: include action_limit to cap pi?
         # act_limit = action_space.high[0]
 
-        # build policy and value functions
-
-        # self.pi = MLPActor(obs_dim, act_dim, hidden_sizes, activation, act_limit)
+        # build policy and action-value functions
         self.q = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation)
-
-
-
-
+        self.pi = epsilon_greedy_policy_fn(self.q, action_space, epsilon)
 
     def act(self, obs):
         with torch.no_grad():
             return self.pi(obs).numpy()
 
 
+def preprocess_obs(obs):
+    """
+    input is np array, output is also np array
+    """
+    # TODO: implement preprocessing step; note: needs to include last 4 images
+    return obs
+
 
 def dqn(env_fn, actor_critic=MLPActorCritic, ac_kwargs=dict(), seed=0,
         steps_per_epoch=4000, epochs=100, replay_size=int(1e6), gamma=0.99,
-        polyak=0.995, pi_lr=1e-3, q_lr=1e-3, batch_size=100, start_steps=10000,
-        update_after=1000, update_every=50, act_noise=0.1, num_test_episodes=10,
-        max_ep_len=1000, logger_kwargs=dict(), save_freq=1):
+        q_lr=1e-3, batch_size=100, start_steps=10000,
+        update_after=1000, update_targ_every=50, act_noise=0.1, num_test_episodes=10,
+        max_ep_len=1000, logger_kwargs=dict(), save_freq=1, epsilon=0.0):
     """
     DQN (Deep Q-Networks). Reproduce the original paper from Minh et al.
     """
+    env = env_fn()
+    # TODO: might have to assert discrete, or otherwise take only first index of shape or so
+    obs_dim = env.observation_space.shape
+    act_dim = env.action_space.shape
 
+    ac = actor_critic(env.observation_space, env.action_space, **ac_kwargs)
+    q_targ = copy.deepcopy(ac.q)
+    for p in q_targ.parameters():
+        p.requires_grad = False
+    q_optimizer = torch.optim.Adam(ac.q.parameters(), lr=q_lr)
 
+    # TODO where does the random seed come into play?
+
+    replay_buffer = ReplayBuffer(obs_dim=obs_dim, act_dim=act_dim, size=replay_size)
+
+    def compute_loss_q(batch_data):
+        # unpack batch data; "_b" means "batch"
+        op_b, a_b, r_b, o2p_b, d_b = batch_data['obs'], batch_data['act'], batch_data['rew'], batch_data['obs2'], \
+                                     batch_data['done']
+        # assumes `a` is a 1D integer array of size batch_size
+        # assumes d is a float array (either 0.0 or 1.0)
+
+        max_q_targ_vals = q_targ(o2p_b).max(dim=-1)  # max of Q over acts; now 1D
+        q_vals = ac.q(op_b)[np.arange(a_b.shape[0]), a_b]
+
+        loss = ((r_b + gamma * max_q_targ_vals * (1 - d_b) - q_vals) ** 2).mean()
+
+        return loss
+
+    total_steps = epochs * steps_per_epoch
+    o = env.reset()
+    op = preprocess_obs(o)  # "op" = "observation_preprocessed"
+    for step in range(total_steps):
+        # Take an env step, then store data in replay buffer
+        a = ac.pi(torch.as_tensor(op, dtype=torch.float32))
+        o2, r, d, _ = env.step(a)
+        o2p = preprocess_obs(o2)
+        replay_buffer.store(op, a, r, o2p, d)
+
+        # Sample a random batch from replay buffer and perform one GD step
+        q_optimizer.zero_grad()
+        batch_data = replay_buffer.sample_batch(batch_size)
+        loss_q = compute_loss_q(batch_data)
+        loss_q.backward()
+        q_optimizer.step()
+
+        # Update target network every so often
+        if step % update_targ_every == 0:
+            q_targ = copy.deepcopy(ac.q)
+            for p in q_targ.parameters():
+                p.requires_grad = False
+
+        # If episode is done, reset env
+        if d:
+            o = env.reset()
+            op = preprocess_obs(o)
+        else:
+            op = o2p
 
 
 if __name__ == '__main__':
@@ -141,6 +203,8 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--exp_name', type=str, default='ddpg')
     args = parser.parse_args()
+
+    # TODO: ensure ac_kwargs includes epsilon
 
     from spinup.utils.run_utils import setup_logger_kwargs
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
