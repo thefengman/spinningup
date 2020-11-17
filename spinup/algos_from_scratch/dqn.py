@@ -25,7 +25,7 @@ def epsilon_greedy_policy_fn(q, action_space, epsilon):
     Returns a numpy array (usually of one element)
     """
     def epsilon_greedy_policy(obs):
-        # Assume batch_size == 1. Need to generalize to allow batch_size > 1
+        # Assume batch_size == 1. Need to generalize to allow batch_size > 1?
         assert obs.dim() == 1
 
         if float(torch.rand(1)) > epsilon:
@@ -36,9 +36,7 @@ def epsilon_greedy_policy_fn(q, action_space, epsilon):
     return epsilon_greedy_policy
 
 
-class MLPQFunction(nn.Module):
-    # TODO: need to fill in this Q function
-
+class QFunction(nn.Module):
     # some code that may or may not be helpful when I get around to coding Q
     # assert type(action_space) is gym.spaces.discrete.Discrete
     # assert type(action_space.sample()) is int  # 1 number, not an array of numbers
@@ -93,29 +91,27 @@ class MLPQFunction(nn.Module):
 
     def __init__(self, obs_dim, act_dim, hidden_sizes, activation):
         super().__init__()
-        self.q = mlp([obs_dim + act_dim] + list(hidden_sizes) + [1], activation)
+        # Emulating DQN paper, use `act_dim` number of output nodes
+        # TODO: for cartpole test, use a fully connected NN (i.e. MLP), but need to change for Atari games
+        self.q = mlp([obs_dim] + list(hidden_sizes) + [act_dim], activation)
 
-    def forward(self, obs, act):
-        q = self.q(torch.cat([obs, act], dim=-1))
-        return torch.squeeze(q, -1)  # Critical to ensure q has right shape.
+    def forward(self, obs):
+        return self.q(obs)
 
 
-class MLPActorCritic(nn.Module):
+class ActorCritic(nn.Module):
     def __init__(self, observation_space, action_space, hidden_sizes=(256, 256),
                  activation=nn.ReLU, epsilon=0.0):
         super().__init__()
         obs_dim = observation_space.shape[0]
         act_dim = action_space.shape[0]
-        # TODO: include action_limit to cap pi?
-        # act_limit = action_space.high[0]
 
         # build policy and action-value functions
-        self.q = MLPQFunction(obs_dim, act_dim, hidden_sizes, activation)
+        self.q = QFunction(obs_dim, act_dim, hidden_sizes, activation)
         self.pi = epsilon_greedy_policy_fn(self.q, action_space, epsilon)
 
     def act(self, obs):
-        with torch.no_grad():
-            return self.pi(obs).numpy()
+        return self.pi(obs)
 
 
 def preprocess_obs(obs):
@@ -149,7 +145,7 @@ def run_test_episode(test_env, ac):
     op = preprocess_obs(o)
     d = False
     while not d:
-        a = ac.pi(torch.as_tensor(op, dtype=torch.float32))
+        a = ac.act(torch.as_tensor(op, dtype=torch.float32))
         o2, r, d, _ = test_env.step(a)
         o2p = preprocess_obs(o2)
         op = o2p
@@ -158,7 +154,7 @@ def run_test_episode(test_env, ac):
     return total_r, total_steps
 
 
-def dqn(env_fn, actor_critic=MLPActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=4000, epochs=100,
+def dqn(env_fn, actor_critic=ActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=4000, epochs=100,
         replay_size=int(1e6), batch_size=100, gamma=0.99, q_lr=1e-3, start_steps=10000,
         update_after=1000, update_targ_every=50, num_test_episodes=10,
         max_ep_len=1000, epsilon=0.0, logger_kwargs=dict(), save_freq=1):
@@ -202,7 +198,7 @@ def dqn(env_fn, actor_critic=MLPActorCritic, ac_kwargs=dict(), seed=0, steps_per
     for step in range(total_steps):
         # Take an env step, then store data in replay buffer
         if step < start_steps:
-            a = ac.pi(torch.as_tensor(op, dtype=torch.float32))
+            a = ac.act(torch.as_tensor(op, dtype=torch.float32))
         else:
             a = env.action_space.sample()
         o2, r, d, _ = env.step(a)
@@ -260,22 +256,21 @@ def dqn(env_fn, actor_critic=MLPActorCritic, ac_kwargs=dict(), seed=0, steps_per
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--env', type=str, default='HalfCheetah-v2')
-    parser.add_argument('--hid', type=int, default=256)
+    parser.add_argument('--env', type=str, default='CartPole-v1')
+    parser.add_argument('--hid', type=int, default=64)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
+    parser.add_argument('--epsilon', type=float, default=0.01)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--exp_name', type=str, default='ddpg')
+    parser.add_argument('--exp_name', type=str, default='dqn')
     args = parser.parse_args()
-
-    # TODO: ensure ac_kwargs includes epsilon
 
     from spinup.utils.run_utils import setup_logger_kwargs
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
 
-    dqn(lambda : gym.make(args.env), actor_critic=MLPActorCritic,
-        ac_kwargs=dict(hidden_sizes=[args.hid]*args.l),
+    dqn(lambda : gym.make(args.env), actor_critic=ActorCritic,
+        ac_kwargs=dict(hidden_sizes=[args.hid]*args.l, epsilon=args.epsilon),
         gamma=args.gamma, seed=args.seed, epochs=args.epochs,
         logger_kwargs=logger_kwargs)
 
