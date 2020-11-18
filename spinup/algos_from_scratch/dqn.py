@@ -13,27 +13,30 @@ import copy
 import time
 
 from spinup.utils.logx import EpochLogger
-from spinup.algos.pytorch.ddpg.core import mlp
-from spinup.algos.pytorch.ddpg.ddpg import ReplayBuffer
+import spinup.algos.pytorch.ddpg.core as core
 
 
-def epsilon_greedy_policy_fn(q, action_space, epsilon):
-    """
-    Call this to create the policy function.
-    assumes type(action_space) is gym.spaces.discrete.Discrete
-    assumes type(action_space.sample()) is int  # 1 number, not an array of numbers
-    Returns a numpy array (usually of one element)
-    """
-    def epsilon_greedy_policy(obs):
+class EpsilonGreedy(nn.Module):
+    def __init__(self, q, action_space, epsilon):
+        super().__init__()
+
+        """
+        assumes type(action_space) is gym.spaces.discrete.Discrete
+        assumes type(action_space.sample()) is int  # 1 number, not an array of numbers
+        Returns a numpy array (usually of one element)
+        """
+        self.q = q
+        self.action_space = action_space
+        self.epsilon = epsilon
+
+    def forward(self, obs):
         # Assume batch_size == 1. Need to generalize to allow batch_size > 1?
         assert obs.dim() == 1
 
-        if float(torch.rand(1)) > epsilon:
-            return q(obs).argmax().numpy()
+        if float(torch.rand(1)) > self.epsilon:
+            return self.q(obs).argmax().numpy()
         else:
-            return np.array(action_space.sample())
-
-    return epsilon_greedy_policy
+            return np.array(self.action_space.sample())
 
 
 class QFunction(nn.Module):
@@ -93,7 +96,7 @@ class QFunction(nn.Module):
         super().__init__()
         # Emulating DQN paper, use `act_dim` number of output nodes
         # TODO: for cartpole test, use a fully connected NN (i.e. MLP), but need to change for Atari games
-        self.q = mlp([obs_dim] + list(hidden_sizes) + [act_dim], activation)
+        self.q = core.mlp([obs_dim] + list(hidden_sizes) + [act_dim], activation)
 
     def forward(self, obs):
         return self.q(obs)
@@ -103,15 +106,55 @@ class ActorCritic(nn.Module):
     def __init__(self, observation_space, action_space, hidden_sizes=(256, 256),
                  activation=nn.ReLU, epsilon=0.0):
         super().__init__()
+        # TODO: generalize to different envs; currently its set for cartpole
         obs_dim = observation_space.shape[0]
-        act_dim = action_space.shape[0]
+        act_dim = action_space.n
 
         # build policy and action-value functions
         self.q = QFunction(obs_dim, act_dim, hidden_sizes, activation)
-        self.pi = epsilon_greedy_policy_fn(self.q, action_space, epsilon)
+        self.pi = EpsilonGreedy(self.q, action_space, epsilon)
 
     def act(self, obs):
         return self.pi(obs)
+
+
+class ReplayBuffer:
+    """
+    A simple FIFO experience replay buffer for DDPG agents.
+    """
+
+    def __init__(self, obs_dim, act_dim, size):
+        self.obs_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
+        self.obs2_buf = np.zeros(core.combined_shape(size, obs_dim), dtype=np.float32)
+        self.act_buf = np.zeros(core.combined_shape(size, act_dim), dtype=int)
+        self.rew_buf = np.zeros(size, dtype=np.float32)
+        self.done_buf = np.zeros(size, dtype=np.float32)
+        self.ptr, self.size, self.max_size = 0, 0, size
+
+    def store(self, obs, act, rew, next_obs, done):
+        self.obs_buf[self.ptr] = obs
+        self.obs2_buf[self.ptr] = next_obs
+        self.act_buf[self.ptr] = act
+        self.rew_buf[self.ptr] = rew
+        self.done_buf[self.ptr] = done
+        self.ptr = (self.ptr+1) % self.max_size
+        self.size = min(self.size+1, self.max_size)
+
+    def sample_batch(self, batch_size=32):
+        idxs = np.random.randint(0, self.size, size=batch_size)
+        batch = dict(obs=self.obs_buf[idxs],
+                     obs2=self.obs2_buf[idxs],
+                     act=self.act_buf[idxs],
+                     rew=self.rew_buf[idxs],
+                     done=self.done_buf[idxs])
+
+        batch_tensors = {}
+        for k, v in batch.items():
+            if k == "act":
+                batch_tensors[k] = torch.as_tensor(v, dtype=torch.int64)
+            else:
+                batch_tensors[k] = torch.as_tensor(v, dtype=torch.float32)
+        return batch_tensors
 
 
 def preprocess_obs(obs):
@@ -127,7 +170,7 @@ def compute_loss_q(batch_data, ac, q_targ, gamma):
     op_b, a_b, r_b, o2p_b, d_b = batch_data['obs'], batch_data['act'], batch_data['rew'], batch_data['obs2'], \
                                  batch_data['done']
     # assumes `a` is a 1D integer array of size batch_size
-    max_q_targ_vals = q_targ(o2p_b).max(dim=-1)  # max of Q over acts; now 1D
+    max_q_targ_vals = q_targ(o2p_b).max(dim=-1)[0]  # max of Q over acts; now 1D
     q_vals = ac.q(op_b)[np.arange(a_b.shape[0]), a_b]
 
     loss = ((r_b + gamma * max_q_targ_vals * (1 - d_b) - q_vals) ** 2).mean()
@@ -154,10 +197,10 @@ def run_test_episode(test_env, ac):
     return total_r, total_steps
 
 
-def dqn(env_fn, actor_critic=ActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=4000, epochs=100,
-        replay_size=int(1e6), batch_size=100, gamma=0.99, q_lr=1e-3, start_steps=10000,
+def dqn(env_fn, actor_critic=ActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=5000, epochs=100,
+        replay_size=int(1e5), batch_size=100, gamma=0.99, q_lr=1e-4, start_steps=10000,
         update_after=1000, update_targ_every=50, num_test_episodes=10,
-        max_ep_len=1000, epsilon=0.0, logger_kwargs=dict(), save_freq=1):
+        max_ep_len=1000, epsilon=0.01, epsilon_decay=0.99999, logger_kwargs=dict(), save_freq=1):
     """
     DQN (Deep Q-Networks). Reproduce the original paper from Minh et al.
     """
@@ -197,7 +240,7 @@ def dqn(env_fn, actor_critic=ActorCritic, ac_kwargs=dict(), seed=0, steps_per_ep
     ep_length = 0  # episode length, counter
     for step in range(total_steps):
         # Take an env step, then store data in replay buffer
-        if step < start_steps:
+        if step > start_steps:
             a = ac.act(torch.as_tensor(op, dtype=torch.float32))
         else:
             a = env.action_space.sample()
@@ -227,17 +270,26 @@ def dqn(env_fn, actor_critic=ActorCritic, ac_kwargs=dict(), seed=0, steps_per_ep
         if d:
             o = env.reset()
             op = preprocess_obs(o)
-            logger.store(EpRet=ep_return, TestEpLen=ep_length)
+            logger.store(EpRet=ep_return, EpLen=ep_length)
+            ep_return = 0
+            ep_length = 0
         else:
             op = o2p
 
         # TODO: confirm: no need for test set if test agent & env are same as training agent & env (e.g. would need
         #  test set if algo added noise to training but not test
-        # # If epoch end, then do a test to see average return thus far
-        # if step % steps_per_epoch == steps_per_epoch - 1:
-        #     for ep_i in range(num_test_episodes):
-        #         test_ep_return, test_ep_length = run_test_episode(test_env, ac)
-        #         logger.store(TestEpRet=test_ep_return, TestEpLen=test_ep_length)
+        # If epoch end, then do a test to see average return thus far
+        if step % steps_per_epoch == steps_per_epoch - 1:
+            for ep_i in range(num_test_episodes):
+                # turn off epsilon exploration:
+                old_epsilon = ac.pi.epsilon
+                ac.pi.epsilon = 0
+
+                test_ep_return, test_ep_length = run_test_episode(test_env, ac)
+                logger.store(TestEpRet=test_ep_return, TestEpLen=test_ep_length)
+
+                # turn it back on
+                ac.pi.epsilon = old_epsilon
 
         # If epoch end, save models and show logged data
         if step % steps_per_epoch == steps_per_epoch - 1:
@@ -247,6 +299,8 @@ def dqn(env_fn, actor_critic=ActorCritic, ac_kwargs=dict(), seed=0, steps_per_ep
             logger.log_tabular("Epoch", epoch_i)
             logger.log_tabular("EpRet", with_min_and_max=True)
             logger.log_tabular("EpLen", average_only=True)
+            logger.log_tabular("TestEpRet", with_min_and_max=True)
+            logger.log_tabular("TestEpLen", average_only=True)
             logger.log_tabular("TimeFromStart", time.time() - start_time)
             logger.dump_tabular()
 
@@ -260,7 +314,7 @@ if __name__ == '__main__':
     parser.add_argument('--hid', type=int, default=64)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--epsilon', type=float, default=0.01)
+    parser.add_argument('--epsilon', type=float, default=0.05)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--exp_name', type=str, default='dqn')
