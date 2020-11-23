@@ -200,7 +200,7 @@ def run_test_episode(test_env, ac):
 def dqn(env_fn, actor_critic=ActorCritic, ac_kwargs=dict(), seed=0, steps_per_epoch=5000, epochs=100,
         replay_size=int(1e5), batch_size=100, gamma=0.99, q_lr=1e-4, start_steps=10000,
         update_after=1000, update_targ_every=50, num_test_episodes=10,
-        max_ep_len=1000, epsilon=0.01, epsilon_decay=0.99999, logger_kwargs=dict(), save_freq=1):
+        max_ep_len=1000, epsilon=0.01, epsilon_decay=0.99995, logger_kwargs=dict(), writer_kwargs=dict(), save_freq=1):
     """
     DQN (Deep Q-Networks). Reproduce the original paper from Minh et al.
     """
@@ -230,7 +230,7 @@ def dqn(env_fn, actor_critic=ActorCritic, ac_kwargs=dict(), seed=0, steps_per_ep
     logger = EpochLogger(**logger_kwargs)
     logger.save_config(locals())
     logger.setup_pytorch_saver(ac)
-    # TODO might want to on tensorboard as well, if want real-time logging
+    writer = SummaryWriter(**writer_kwargs)
 
     start_time = time.time()
     total_steps = epochs * steps_per_epoch
@@ -241,6 +241,7 @@ def dqn(env_fn, actor_critic=ActorCritic, ac_kwargs=dict(), seed=0, steps_per_ep
     for step in range(total_steps):
         # Take an env step, then store data in replay buffer
         if step > start_steps:
+            ac.pi.epsilon = max(epsilon, epsilon_decay**step)
             a = ac.act(torch.as_tensor(op, dtype=torch.float32))
         else:
             a = env.action_space.sample()
@@ -293,9 +294,15 @@ def dqn(env_fn, actor_critic=ActorCritic, ac_kwargs=dict(), seed=0, steps_per_ep
 
         # If epoch end, save models and show logged data
         if step % steps_per_epoch == steps_per_epoch - 1:
-            logger.save_state({'env': env}, None)  # saves both ac and env
-
             epoch_i = int(step // steps_per_epoch)
+
+            writer.add_scalar("EpRet_mean", logger.get_stats("EpRet")[0], epoch_i)  # first item in `get_stats` is mean
+            writer.add_scalar("EpRet_std", logger.get_stats("EpRet")[1], epoch_i)  # 2nd item in `get_stats` is std
+            writer.add_scalar("TestEpRet_mean", logger.get_stats("TestEpRet")[0], epoch_i)
+            writer.add_scalar("TestEpRet_std", logger.get_stats("TestEpRet")[1], epoch_i)
+            writer.add_scalar("epsilon", ac.pi.epsilon, epoch_i)
+
+            logger.save_state({'env': env}, None)  # saves both ac and env
             logger.log_tabular("Epoch", epoch_i)
             logger.log_tabular("EpRet", with_min_and_max=True)
             logger.log_tabular("EpLen", average_only=True)
@@ -306,6 +313,7 @@ def dqn(env_fn, actor_critic=ActorCritic, ac_kwargs=dict(), seed=0, steps_per_ep
 
     # Save model at end
     logger.save_state({'env': env}, None)
+    writer.close()
 
 
 if __name__ == '__main__':
@@ -314,7 +322,7 @@ if __name__ == '__main__':
     parser.add_argument('--hid', type=int, default=64)
     parser.add_argument('--l', type=int, default=2)
     parser.add_argument('--gamma', type=float, default=0.99)
-    parser.add_argument('--epsilon', type=float, default=0.05)
+    parser.add_argument('--epsilon', type=float, default=0.02)
     parser.add_argument('--seed', '-s', type=int, default=0)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--exp_name', type=str, default='dqn')
@@ -322,11 +330,14 @@ if __name__ == '__main__':
 
     from spinup.utils.run_utils import setup_logger_kwargs
     logger_kwargs = setup_logger_kwargs(args.exp_name, args.seed)
+    tag = "dqn_cartpoletest_exp1_eps0.01_epsdecay0.99995"
+    writer_kwargs = {"log_dir": f"runs/{tag}",
+                     "flush_secs": 30}
 
     dqn(lambda : gym.make(args.env), actor_critic=ActorCritic,
         ac_kwargs=dict(hidden_sizes=[args.hid]*args.l, epsilon=args.epsilon),
         gamma=args.gamma, seed=args.seed, epochs=args.epochs,
-        logger_kwargs=logger_kwargs)
+        logger_kwargs=logger_kwargs, writer_kwargs=writer_kwargs)
 
 
 
